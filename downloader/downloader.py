@@ -656,11 +656,6 @@ class Downloader:
                         )
                     else:
                         # Modo multi (threaded)
-                        if self.enforce_queue_limit:
-                            # Wait for available slot before submitting
-                            while len(futures) - sum(f.done() for f in futures) >= self.max_workers:
-                                time.sleep(0.1)
-                        
                         future = self.executor.submit(
                             self.process_media_element,
                             media_url,
