@@ -1,12 +1,13 @@
 import requests
 from bs4 import BeautifulSoup
 import os
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from app import progress_manager
 
 class Jpg5Downloader:
-    def __init__(self, url, carpeta_destino, progress_manager, log_callback=None, tr=None, update_progress_callback=None, update_global_progress_callback=None, max_workers=3):
+    def __init__(self, url, carpeta_destino, progress_manager, log_callback=None, tr=None, update_progress_callback=None, update_global_progress_callback=None, max_workers=3, stall_timeout=60):
         self.url = url
         self.carpeta_destino = carpeta_destino
         self.log_callback = log_callback
@@ -16,6 +17,7 @@ class Jpg5Downloader:
         self.update_global_progress_callback = update_global_progress_callback
         self.max_workers = max_workers
         self.progress_manager = progress_manager
+        self.stall_timeout = stall_timeout  # Timeout if no data received (seconds)
 
     def log(self, message):
         if self.log_callback:
@@ -87,19 +89,38 @@ class Jpg5Downloader:
 
                     img_nombre = os.path.basename(descarga_url)
                     img_path = os.path.join(self.carpeta_destino, img_nombre)
+                    tmp_path = img_path + ".tmp"
                     total_size = int(img_respuesta.headers.get('content-length', 0))
                     downloaded_size = 0
+                    last_progress_time = time.time()
 
-                    with open(img_path, 'wb') as f:
+                    with open(tmp_path, 'wb') as f:
                         for chunk in img_respuesta.iter_content(chunk_size=1024):
                             if self.cancel_requested.is_set():
                                 self.log(self.tr("Descarga cancelada por el usuario."))
+                                if os.path.exists(tmp_path):
+                                    os.remove(tmp_path)
                                 return
-                            f.write(chunk)
-                            downloaded_size += len(chunk)
-                            if self.update_progress_callback:
-                                self.update_progress_callback(downloaded_size, total_size)
+                            
+                            # Check for stalled download
+                            current_time = time.time()
+                            if current_time - last_progress_time > self.stall_timeout:
+                                self.log(self.tr(f"Download stalled (no data for {self.stall_timeout}s): {img_nombre}"))
+                                if os.path.exists(tmp_path):
+                                    os.remove(tmp_path)
+                                raise TimeoutError("Download stalled - no data received")
+                            
+                            if chunk:
+                                f.write(chunk)
+                                downloaded_size += len(chunk)
+                                last_progress_time = current_time
+                                if self.update_progress_callback:
+                                    self.update_progress_callback(downloaded_size, total_size)
 
+                    # Rename temp file to final file on success
+                    if os.path.exists(img_path):
+                        os.remove(img_path)
+                    os.rename(tmp_path, img_path)
                     self.log(self.tr(f"Imagen descargada: {img_nombre}"))
 
                     if self.update_global_progress_callback:

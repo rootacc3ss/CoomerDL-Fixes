@@ -13,7 +13,7 @@ from requests.exceptions import ChunkedEncodingError
 from tkinter import messagebox, simpledialog
 
 class EromeDownloader:
-    def __init__(self, root, log_callback=None, enable_widgets_callback=None, update_progress_callback=None, update_global_progress_callback=None, download_images=True, download_videos=True, headers=None, language="en", is_profile_download=False, direct_download=False, tr=None, max_workers=5):
+    def __init__(self, root, log_callback=None, enable_widgets_callback=None, update_progress_callback=None, update_global_progress_callback=None, download_images=True, download_videos=True, headers=None, language="en", is_profile_download=False, direct_download=False, tr=None, max_workers=5, stall_timeout=60):
         self.root = root
         self.session = requests.Session()
         self.headers = {k: str(v).encode('ascii', 'ignore').decode('ascii') for k, v in (headers or {
@@ -35,6 +35,7 @@ class EromeDownloader:
         self.is_profile_download = is_profile_download
         self.direct_download = direct_download  # Option for direct downloads without folder creation
         self.tr = tr if tr else lambda x, **kwargs: x.format(**kwargs)  # Translation function
+        self.stall_timeout = stall_timeout  # Timeout if no data received (seconds)
 
     def request_cancel(self):
         self.cancel_requested = True
@@ -102,29 +103,41 @@ class EromeDownloader:
                     total_size = int(response.headers.get("content-length", 0))
                     downloaded_size = 0
                     start_time = last_update = time.time()
+                    last_progress_time = time.time()
 
                     with open(file_path, "wb") as f:
                         for chunk in response.iter_content(chunk_size=65536):
                             if self.cancel_requested:
+                                if os.path.exists(file_path):
+                                    os.remove(file_path)
                                 return
-                            f.write(chunk)
-                            downloaded_size += len(chunk)
-
-                            # Envía actualización cada 0.5 s máx.
+                            
+                            # Check for stalled download
                             now = time.time()
-                            if now - last_update >= 0.5:
-                                elapsed = now - start_time
-                                speed = downloaded_size / elapsed if elapsed else 0
-                                eta   = ((total_size - downloaded_size) / speed
-                                         if speed else None)
-                                self.update_progress_callback(
-                                    downloaded_size, total_size,
-                                    file_id=file_id,
-                                    file_path=file_path,
-                                    speed=speed,
-                                    eta=eta
-                                )
-                                last_update = now
+                            if now - last_progress_time > self.stall_timeout:
+                                self.log(self.tr("Download stalled (no data for {timeout}s): {file_path}",
+                                               timeout=self.stall_timeout, file_path=file_path))
+                                raise requests.exceptions.Timeout("Download stalled - no data received")
+                            
+                            if chunk:
+                                f.write(chunk)
+                                downloaded_size += len(chunk)
+                                last_progress_time = now
+
+                                # Envía actualización cada 0.5 s máx.
+                                if now - last_update >= 0.5:
+                                    elapsed = now - start_time
+                                    speed = downloaded_size / elapsed if elapsed else 0
+                                    eta   = ((total_size - downloaded_size) / speed
+                                             if speed else None)
+                                    self.update_progress_callback(
+                                        downloaded_size, total_size,
+                                        file_id=file_id,
+                                        file_path=file_path,
+                                        speed=speed,
+                                        eta=eta
+                                    )
+                                    last_update = now
 
                     # ─────── Fin de la descarga ───────
                     elapsed = time.time() - start_time

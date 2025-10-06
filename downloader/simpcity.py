@@ -2,6 +2,7 @@ import os
 import json
 import re
 import queue
+import time
 from pathlib import Path
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
@@ -14,7 +15,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from concurrent.futures import ThreadPoolExecutor
 
 class SimpCity:
-    def __init__(self, download_folder, max_workers=5, log_callback=None, enable_widgets_callback=None, update_progress_callback=None, update_global_progress_callback=None, tr=None):
+    def __init__(self, download_folder, max_workers=5, log_callback=None, enable_widgets_callback=None, update_progress_callback=None, update_global_progress_callback=None, tr=None, stall_timeout=60):
         self.download_folder = download_folder
         self.max_workers = max_workers
         self.descargadas = set()
@@ -28,6 +29,7 @@ class SimpCity:
         self.download_queue = queue.Queue()
         self.scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
         self.tr = tr
+        self.stall_timeout = stall_timeout  # Timeout if no data received (seconds)
 
         # Selectors from original crawler
         self.title_selector = "h1[class=p-title-value]"
@@ -92,14 +94,34 @@ class SimpCity:
 
     def save_file(self, file_url, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        response = self.scraper.get(file_url, stream=True)
-        if response.status_code == 200:
-            with open(path, 'wb') as file:
-                for chunk in response.iter_content(1024):
-                    file.write(chunk)
-            self.log(self.tr(f"Archivo descargado: {path}"))
-        else:
-            self.log(self.tr(f"Error al descargar {file_url}: {response.status_code}"))
+        tmp_path = path + ".tmp"
+        try:
+            response = self.scraper.get(file_url, stream=True, timeout=30)
+            if response.status_code == 200:
+                last_progress_time = time.time()
+                with open(tmp_path, 'wb') as file:
+                    for chunk in response.iter_content(1024):
+                        # Check for stalled download
+                        current_time = time.time()
+                        if current_time - last_progress_time > self.stall_timeout:
+                            self.log(self.tr(f"Download stalled (no data for {self.stall_timeout}s): {path}"))
+                            raise TimeoutError("Download stalled - no data received")
+                        
+                        if chunk:
+                            file.write(chunk)
+                            last_progress_time = current_time
+                
+                # Rename temp file to final file on success
+                if os.path.exists(path):
+                    os.remove(path)
+                os.rename(tmp_path, path)
+                self.log(self.tr(f"Archivo descargado: {path}"))
+            else:
+                self.log(self.tr(f"Error al descargar {file_url}: {response.status_code}"))
+        except Exception as e:
+            self.log(self.tr(f"Error downloading {file_url}: {e}"))
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def process_post(self, post_content, download_folder):
         # Procesar imágenes

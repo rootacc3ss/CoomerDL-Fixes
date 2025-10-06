@@ -35,13 +35,34 @@ class SettingsWindow:
 
     def load_settings(self):
         if not os.path.exists(self.CONFIG_PATH):
-            return {'max_downloads': 3, 'folder_structure': 'default', 'language': 'en', 'theme': 'System'}
+            return {
+                'max_downloads': 3, 
+                'folder_structure': 'default', 
+                'language': 'en', 
+                'theme': 'System',
+                'stall_timeout': 60,
+                'chunk_timeout': 30,
+                'enforce_queue_limit': True
+            }
 
         try:
             with open(self.CONFIG_PATH, 'r') as file:
-                return json.load(file)
+                settings = json.load(file)
+                # Add defaults for new settings if not present
+                settings.setdefault('stall_timeout', 60)
+                settings.setdefault('chunk_timeout', 30)
+                settings.setdefault('enforce_queue_limit', True)
+                return settings
         except (FileNotFoundError, json.JSONDecodeError):
-            return {'max_downloads': 3, 'folder_structure': 'default', 'language': 'en', 'theme': 'System'}
+            return {
+                'max_downloads': 3, 
+                'folder_structure': 'default', 
+                'language': 'en', 
+                'theme': 'System',
+                'stall_timeout': 60,
+                'chunk_timeout': 30,
+                'enforce_queue_limit': True
+            }
 
     def save_settings(self):
         os.makedirs(os.path.dirname(self.CONFIG_PATH), exist_ok=True)
@@ -352,9 +373,14 @@ class SettingsWindow:
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        # Frame for the "Downloads" tab
-        downloads_frame = ctk.CTkFrame(tab, fg_color="transparent")
-        downloads_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        # Create a scrollable frame for the downloads tab
+        downloads_scrollable = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        downloads_scrollable.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        downloads_scrollable.grid_columnconfigure(1, weight=1)
+
+        # Frame for the "Downloads" tab content
+        downloads_frame = ctk.CTkFrame(downloads_scrollable, fg_color="transparent")
+        downloads_frame.pack(fill="both", expand=True, padx=10, pady=10)
         downloads_frame.grid_columnconfigure(1, weight=1)
 
         download_label = ctk.CTkLabel(downloads_frame, text=self.translate("Download Options"), font=("Helvetica", 16, "bold"))
@@ -469,6 +495,76 @@ class SettingsWindow:
 
 
         # ----------------------------
+        # Separator
+        # ----------------------------
+        separator_timeout = ttk.Separator(downloads_frame, orient="horizontal")
+        separator_timeout.grid(row=7, column=0, columnspan=2, sticky="ew", pady=15)
+
+        # ----------------------------
+        # Advanced Download Settings Header
+        # ----------------------------
+        advanced_label = ctk.CTkLabel(downloads_frame, text=self.translate("Advanced Settings"), font=("Helvetica", 14, "bold"))
+        advanced_label.grid(row=8, column=0, columnspan=2, sticky="w", pady=(5, 10))
+
+        # ----------------------------
+        # Stall timeout
+        # ----------------------------
+        stall_timeout_label = ctk.CTkLabel(downloads_frame, text=self.translate("Stall Timeout (seconds)"))
+        stall_timeout_label.grid(row=9, column=0, pady=5, sticky="w")
+
+        stall_timeout_entry = ctk.CTkEntry(downloads_frame, width=80)
+        stall_timeout_entry.insert(0, str(self.settings.get('stall_timeout', 60)))
+        stall_timeout_entry.grid(row=9, column=1, pady=5, padx=(10, 0), sticky="w")
+
+        # Tooltip/description for stall timeout
+        stall_desc = ctk.CTkLabel(
+            downloads_frame, 
+            text=self.translate("Max time without data before considering download stalled"),
+            font=("Helvetica", 9),
+            text_color="gray"
+        )
+        stall_desc.grid(row=10, column=0, columnspan=2, sticky="w", padx=(0, 0))
+
+        # ----------------------------
+        # Chunk timeout
+        # ----------------------------
+        chunk_timeout_label = ctk.CTkLabel(downloads_frame, text=self.translate("Chunk Timeout (seconds)"))
+        chunk_timeout_label.grid(row=11, column=0, pady=5, sticky="w")
+
+        chunk_timeout_entry = ctk.CTkEntry(downloads_frame, width=80)
+        chunk_timeout_entry.insert(0, str(self.settings.get('chunk_timeout', 30)))
+        chunk_timeout_entry.grid(row=11, column=1, pady=5, padx=(10, 0), sticky="w")
+
+        # Tooltip/description for chunk timeout
+        chunk_desc = ctk.CTkLabel(
+            downloads_frame, 
+            text=self.translate("HTTP request timeout for individual chunks"),
+            font=("Helvetica", 9),
+            text_color="gray"
+        )
+        chunk_desc.grid(row=12, column=0, columnspan=2, sticky="w", padx=(0, 0))
+
+        # ----------------------------
+        # Enforce Queue Limit Checkbox
+        # ----------------------------
+        enforce_queue_var = ctk.IntVar(value=1 if self.settings.get('enforce_queue_limit', True) else 0)
+        enforce_queue_checkbox = ctk.CTkCheckBox(
+            downloads_frame,
+            text=self.translate("Enforce concurrent download limit"),
+            variable=enforce_queue_var
+        )
+        enforce_queue_checkbox.grid(row=13, column=0, columnspan=2, pady=10, sticky="w")
+
+        # Tooltip/description for enforce queue
+        queue_desc = ctk.CTkLabel(
+            downloads_frame, 
+            text=self.translate("When enabled, ensures max concurrent downloads are not exceeded until all complete"),
+            font=("Helvetica", 9),
+            text_color="gray"
+        )
+        queue_desc.grid(row=14, column=0, columnspan=2, sticky="w", padx=(0, 0))
+
+        # ----------------------------
         # Botón para aplicar configuración
         # ----------------------------
         apply_download_button = ctk.CTkButton(
@@ -479,10 +575,13 @@ class SettingsWindow:
                 folder_structure_combobox,
                 retry_combobox,
                 retry_interval_entry,
-                file_naming_combobox
+                file_naming_combobox,
+                stall_timeout_entry,
+                chunk_timeout_entry,
+                enforce_queue_var
             )
         )
-        apply_download_button.grid(row=7, column=1, pady=10, sticky="e")
+        apply_download_button.grid(row=15, column=1, pady=10, sticky="e")
 
 
 
@@ -568,13 +667,17 @@ class SettingsWindow:
             except Exception as e:
                 messagebox.showerror(self.translate("Error"), self.translate(f"Error clearing database: {e}"))
 
-    def apply_download_settings(self,max_downloads_combobox,folder_structure_combobox,retry_combobox,retry_interval_entry,file_naming_combobox):
+    def apply_download_settings(self, max_downloads_combobox, folder_structure_combobox, 
+                               retry_combobox, retry_interval_entry, file_naming_combobox,
+                               stall_timeout_entry, chunk_timeout_entry, enforce_queue_var):
         try:
-
             max_downloads = int(max_downloads_combobox.get())
             folder_structure = folder_structure_combobox.get()
             max_retries = int(retry_combobox.get())
             retry_interval = float(retry_interval_entry.get())
+            stall_timeout = int(stall_timeout_entry.get())
+            chunk_timeout = int(chunk_timeout_entry.get())
+            enforce_queue_limit = bool(enforce_queue_var.get())
 
             file_naming_mode_str = file_naming_combobox.get()
 
@@ -585,24 +688,26 @@ class SettingsWindow:
                 "Post Date/Time + Post Name": 3
             }
             numeric_mode = mapping.get(file_naming_mode_str, 0)
-            self.downloader.file_naming_mode = numeric_mode
 
             self.settings['max_downloads'] = max_downloads
             self.settings['folder_structure'] = folder_structure
             self.settings['max_retries'] = max_retries
             self.settings['retry_interval'] = retry_interval
             self.settings['file_naming_mode'] = numeric_mode
+            self.settings['stall_timeout'] = stall_timeout
+            self.settings['chunk_timeout'] = chunk_timeout
+            self.settings['enforce_queue_limit'] = enforce_queue_limit
 
             self.save_settings()
 
             if self.downloader:
                 self.downloader.update_max_downloads(max_downloads)
-
                 self.downloader.max_retries = max_retries
                 self.downloader.retry_interval = retry_interval
-
                 self.downloader.file_naming_mode = numeric_mode
-
+                self.downloader.stall_timeout = stall_timeout
+                self.downloader.chunk_timeout = chunk_timeout
+                self.downloader.enforce_queue_limit = enforce_queue_limit
 
             messagebox.showinfo(
                 self.translate("Éxito"),

@@ -136,8 +136,13 @@ class ImageDownloaderApp(ctk.CTk):
             update_progress_callback=self.update_progress,
             update_global_progress_callback=self.update_global_progress,
             tr=self.tr,
-            folder_structure=self.settings.get('folder_structure', 'default')
+            folder_structure=self.settings.get('folder_structure', 'default'),
+            stall_timeout=self.settings.get('stall_timeout', 60),
+            chunk_timeout=self.settings.get('chunk_timeout', 30),
+            max_retries=self.settings.get('max_retries', 3),
+            retry_interval=self.settings.get('retry_interval', 2.0)
         )
+        self.default_downloader.enforce_queue_limit = self.settings.get('enforce_queue_limit', True)
         
         self.settings_window.downloader = self.default_downloader
 
@@ -603,7 +608,8 @@ class ImageDownloaderApp(ctk.CTk):
             download_videos=self.download_videos_check.get(),
             is_profile_download=is_profile_download,
             max_workers=self.max_downloads,
-            tr=self.tr
+            tr=self.tr,
+            stall_timeout=self.settings.get('stall_timeout', 60)
         )
 
     def setup_simpcity_downloader(self):
@@ -613,7 +619,8 @@ class ImageDownloaderApp(ctk.CTk):
             enable_widgets_callback=self.enable_widgets,
             update_progress_callback=self.update_progress,
             update_global_progress_callback=self.update_global_progress,
-            tr=self.tr
+            tr=self.tr,
+            stall_timeout=self.settings.get('stall_timeout', 60)
         )
 
     def setup_bunkr_downloader(self):
@@ -627,7 +634,9 @@ class ImageDownloaderApp(ctk.CTk):
                 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
                 'Referer': 'https://bunkr.site/',
             },
-            max_workers=self.max_downloads
+            max_workers=self.max_downloads,
+            stall_timeout=self.settings.get('stall_timeout', 60),
+            chunk_timeout=self.settings.get('chunk_timeout', 30)
         )
 
     def setup_general_downloader(self):
@@ -647,9 +656,14 @@ class ImageDownloaderApp(ctk.CTk):
             download_compressed=self.download_compressed_check.get(),
             tr=self.tr,
             max_workers=self.max_downloads,
-            folder_structure=self.settings.get('folder_structure', 'default')
+            folder_structure=self.settings.get('folder_structure', 'default'),
+            stall_timeout=self.settings.get('stall_timeout', 60),
+            chunk_timeout=self.settings.get('chunk_timeout', 30),
+            max_retries=self.settings.get('max_retries', 3),
+            retry_interval=self.settings.get('retry_interval', 2.0)
         )
         self.general_downloader.file_naming_mode = self.settings.get('file_naming_mode', 0)
+        self.general_downloader.enforce_queue_limit = self.settings.get('enforce_queue_limit', True)
 
     def setup_jpg5_downloader(self):
         self.active_downloader = Jpg5Downloader(
@@ -658,7 +672,8 @@ class ImageDownloaderApp(ctk.CTk):
             log_callback=self.add_log_message_safe,
             tr=self.tr,
             progress_manager=self.progress_manager,
-            max_workers=self.max_downloads
+            max_workers=self.max_downloads,
+            stall_timeout=self.settings.get('stall_timeout', 60)
         )
 
     # Folder selection

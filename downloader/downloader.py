@@ -15,7 +15,8 @@ class Downloader:
                  update_global_progress_callback=None, headers=None,
                  max_retries=3, retry_interval=2.0,
                  download_images=True, download_videos=True, download_compressed=True, 
-                 tr=None, folder_structure='default', rate_limit_interval=2.0):
+                 tr=None, folder_structure='default', rate_limit_interval=2.0,
+                 stall_timeout=60, chunk_timeout=30):
         
         self.download_folder = download_folder
         self.log_callback = log_callback
@@ -60,6 +61,10 @@ class Downloader:
         self.post_attachment_counter = defaultdict(int)
         self.subdomain_cache = {}
         self.subdomain_locks = defaultdict(threading.Lock)
+        self.stall_timeout = stall_timeout  # Timeout if no data received (seconds)
+        self.chunk_timeout = chunk_timeout  # Timeout for individual chunk reads
+        self.max_resume_attempts = 5  # Maximum resume attempts before giving up
+        self.enforce_queue_limit = True  # Enforce max concurrent downloads limit
 
         
         # ----- NUEVA SECCIÓN: INICIALIZACIÓN DE LA BASE DE DATOS -----
@@ -438,47 +443,29 @@ class Downloader:
 
         downloaded_size = 0
         self.start_time = time.time()
+        last_progress_time = time.time()
 
         # Abrir el archivo temporal para escribir los primeros chunks.
-        with open(tmp_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=1048576):
-                if self.cancel_requested.is_set():
-                    f.close()
-                    os.remove(tmp_path)
-                    self.log(f"Download cancelled from {media_url}")
-                    return
-                if chunk:
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    if self.update_progress_callback:
-                        elapsed_time = time.time() - self.start_time
-                        speed = downloaded_size / elapsed_time if elapsed_time > 0 else 0
-                        remaining_time = (total_size - downloaded_size) / speed if speed > 0 else 0
-                        self.update_progress_callback(downloaded_size, total_size,
-                                                    file_id=download_id,
-                                                    file_path=tmp_path,
-                                                    speed=speed,
-                                                    eta=remaining_time)
-
-        # Si no se ha descargado el total esperado, reanudar la descarga
-        while total_size and downloaded_size < total_size:
-            # Prepara cabecera para reanudar la descarga
-            resume_headers = self.headers.copy()
-            resume_headers['Range'] = f'bytes={downloaded_size}-'
-            self.log(f"Resuming download at byte {downloaded_size} for {media_url}")
-            part_response = self.session.get(media_url, stream=True, headers=resume_headers, timeout=30)
-            part_response.raise_for_status()
-
-            with open(tmp_path, 'ab') as f:
-                for chunk in part_response.iter_content(chunk_size=1048576):
+        try:
+            with open(tmp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1048576):
                     if self.cancel_requested.is_set():
                         f.close()
-                        os.remove(tmp_path)
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
                         self.log(f"Download cancelled from {media_url}")
                         return
+                    
+                    # Check for stalled download
+                    current_time = time.time()
+                    if current_time - last_progress_time > self.stall_timeout:
+                        self.log(f"Download stalled (no data for {self.stall_timeout}s), will attempt resume: {media_url}")
+                        break
+                    
                     if chunk:
                         f.write(chunk)
                         downloaded_size += len(chunk)
+                        last_progress_time = current_time
                         if self.update_progress_callback:
                             elapsed_time = time.time() - self.start_time
                             speed = downloaded_size / elapsed_time if elapsed_time > 0 else 0
@@ -488,6 +475,81 @@ class Downloader:
                                                         file_path=tmp_path,
                                                         speed=speed,
                                                         eta=remaining_time)
+        except Exception as e:
+            self.log(f"Error during initial download from {media_url}: {e}")
+            # Will attempt resume below if partial data was downloaded
+
+        # Si no se ha descargado el total esperado, reanudar la descarga
+        resume_attempts = 0
+        while total_size and downloaded_size < total_size and resume_attempts < self.max_resume_attempts:
+            if self.cancel_requested.is_set():
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                self.log(f"Download cancelled from {media_url}")
+                return
+            
+            resume_attempts += 1
+            # Prepara cabecera para reanudar la descarga
+            resume_headers = self.headers.copy()
+            resume_headers['Range'] = f'bytes={downloaded_size}-'
+            self.log(f"Resuming download at byte {downloaded_size} for {media_url} (attempt {resume_attempts}/{self.max_resume_attempts})")
+            
+            try:
+                # Create a fresh session for resume to avoid stale connections
+                part_response = self.session.get(media_url, stream=True, headers=resume_headers, timeout=self.chunk_timeout)
+                part_response.raise_for_status()
+                
+                last_progress_time = time.time()
+                with open(tmp_path, 'ab') as f:
+                    for chunk in part_response.iter_content(chunk_size=1048576):
+                        if self.cancel_requested.is_set():
+                            f.close()
+                            if os.path.exists(tmp_path):
+                                os.remove(tmp_path)
+                            self.log(f"Download cancelled from {media_url}")
+                            return
+                        
+                        # Check for stalled download during resume
+                        current_time = time.time()
+                        if current_time - last_progress_time > self.stall_timeout:
+                            self.log(f"Resume stalled (no data for {self.stall_timeout}s): {media_url}")
+                            break
+                        
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+                            last_progress_time = current_time
+                            if self.update_progress_callback:
+                                elapsed_time = time.time() - self.start_time
+                                speed = downloaded_size / elapsed_time if elapsed_time > 0 else 0
+                                remaining_time = (total_size - downloaded_size) / speed if speed > 0 else 0
+                                self.update_progress_callback(downloaded_size, total_size,
+                                                            file_id=download_id,
+                                                            file_path=tmp_path,
+                                                            speed=speed,
+                                                            eta=remaining_time)
+                
+                # If we successfully completed the download, break
+                if downloaded_size >= total_size:
+                    break
+                    
+            except requests.exceptions.Timeout:
+                self.log(f"Resume timeout for {media_url}, attempt {resume_attempts}/{self.max_resume_attempts}")
+                time.sleep(self.retry_interval)
+            except requests.exceptions.RequestException as e:
+                self.log(f"Resume error for {media_url}: {e}")
+                time.sleep(self.retry_interval)
+            except Exception as e:
+                self.log(f"Unexpected error during resume for {media_url}: {e}")
+                time.sleep(self.retry_interval)
+        
+        # Check if download completed successfully or hit max resume attempts
+        if total_size and downloaded_size < total_size:
+            self.log(f"Failed to complete download after {resume_attempts} resume attempts: {media_url}")
+            self.failed_files.append(media_url)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return
 
         # Una vez completada la descarga, renombrar el archivo.
         if os.path.exists(final_path):
@@ -509,9 +571,6 @@ class Downloader:
             self.db_connection.commit()
 
         self.download_cache[media_url] = (final_path, total_size)
-
-
-
 
     def get_remote_file_size(self, media_url, filename):
         try:
@@ -539,6 +598,8 @@ class Downloader:
             if not posts:
                 self.log(self.tr("No posts found for this user."))
                 return
+            
+            self.log(self.tr(f"{len(posts)} posts detected for processing"))
 
             if not download_all:
                 # Limita a los primeros 50 posts si no es "download all"
@@ -563,6 +624,9 @@ class Downloader:
 
                     # Aumentamos total_files
                     self.total_files += 1
+
+            # Log total files detected
+            self.log(self.tr(f"{self.total_files} items detected for download"))
 
             # Segunda pasada, ya sabiendo cuántos archivos totales
             # (Para el "progress" si así lo requieres)
@@ -592,14 +656,19 @@ class Downloader:
                         )
                     else:
                         # Modo multi (threaded)
+                        if self.enforce_queue_limit:
+                            # Wait for available slot before submitting
+                            while len(futures) - sum(f.done() for f in futures) >= self.max_workers:
+                                time.sleep(0.1)
+                        
                         future = self.executor.submit(
                             self.process_media_element,
                             media_url,
                             user_id,
                             current_post_id,
-                            title,  # <-- pasamos el título aquí
+                            title,
                             time,
-                            media_url 
+                            media_url
                         )
                         futures.append(future)
 
@@ -608,6 +677,10 @@ class Downloader:
                 for future in as_completed(futures):
                     if self.cancel_requested.is_set():
                         break
+                    try:
+                        future.result()  # Get result to catch any exceptions
+                    except Exception as e:
+                        self.log(f"Error in download task: {e}")
 
             # Intentamos re-descargar fallidos, si deseas
             if self.failed_files:

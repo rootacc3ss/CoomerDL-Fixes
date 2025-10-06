@@ -10,7 +10,7 @@ import re
 import threading
 
 class BunkrDownloader:
-    def __init__(self, download_folder, log_callback=None, enable_widgets_callback=None, update_progress_callback=None, update_global_progress_callback=None, headers=None, max_workers=5, translations=None):
+    def __init__(self, download_folder, log_callback=None, enable_widgets_callback=None, update_progress_callback=None, update_global_progress_callback=None, headers=None, max_workers=5, translations=None, stall_timeout=60, chunk_timeout=30):
         self.download_folder = download_folder
         self.log_callback = log_callback
         self.enable_widgets_callback = enable_widgets_callback
@@ -31,7 +31,9 @@ class BunkrDownloader:
         self.log_messages = []  # Cola para almacenar mensajes de log
         self.notification_interval = 10  # Intervalo de notificación en segundos
         self.start_notification_thread()
-        self.translations = translations or {}  
+        self.translations = translations or {}
+        self.stall_timeout = stall_timeout  # Timeout if no data received (seconds)
+        self.chunk_timeout = chunk_timeout  # Timeout for individual chunk reads  
 
     def start_notification_thread(self):
         def notify_user():
@@ -82,6 +84,7 @@ class BunkrDownloader:
 
         file_name = os.path.basename(urlparse(url_media).path)
         file_path = os.path.join(ruta_carpeta, file_name)
+        tmp_path = file_path + ".tmp"
         
         if os.path.exists(file_path):
             self.log(f"El archivo ya existe, omitiendo: {file_path}")
@@ -95,25 +98,41 @@ class BunkrDownloader:
         for attempt in range(max_attempts):
             try:
                 self.log(f"Intentando descargar {url_media} (Intento {attempt + 1}/{max_attempts})")
-                response = self.session.get(url_media, headers=self.headers, stream=True)
+                response = self.session.get(url_media, headers=self.headers, stream=True, timeout=self.chunk_timeout)
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded_size = 0
+                last_progress_time = time.time()
 
                 # Descargar el archivo en fragmentos
-                with open(file_path, 'wb') as file:
+                with open(tmp_path, 'wb') as file:
                     for chunk in response.iter_content(chunk_size=65536):  # Fragmentos de 64KB
                         if self.cancel_requested:
                             self.log("Descarga cancelada durante la descarga del archivo.", url=url_media)
                             file.close()
-                            os.remove(file_path)
+                            if os.path.exists(tmp_path):
+                                os.remove(tmp_path)
                             return
-                        file.write(chunk)
-                        downloaded_size += len(chunk)
-                        if self.update_progress_callback:
-                            self.update_progress_callback(downloaded_size, total_size, file_id=file_id, file_path=file_path)
+                        
+                        # Check for stalled download
+                        current_time = time.time()
+                        if current_time - last_progress_time > self.stall_timeout:
+                            self.log(f"Download stalled (no data for {self.stall_timeout}s): {url_media}")
+                            raise requests.exceptions.Timeout("Download stalled - no data received")
+                        
+                        if chunk:
+                            file.write(chunk)
+                            downloaded_size += len(chunk)
+                            last_progress_time = current_time
+                            if self.update_progress_callback:
+                                self.update_progress_callback(downloaded_size, total_size, file_id=file_id, file_path=tmp_path)
 
+                # Rename temp file to final file on success
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                os.rename(tmp_path, file_path)
+                
                 self.log("Archivo descargado", url=url_media)
                 # Notificar al usuario al completar la descarga
                 if self.log_callback:
@@ -122,15 +141,31 @@ class BunkrDownloader:
                 if self.update_global_progress_callback:
                     self.update_global_progress_callback(self.completed_files, self.total_files)
                 break
+            except requests.exceptions.Timeout:
+                self.log(f"Timeout downloading {url_media}. Attempt {attempt + 1} of {max_attempts}")
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                if attempt < max_attempts - 1:
+                    time.sleep(delay)
+                    delay *= 2
             except requests.RequestException as e:
-                if response.status_code == 429:
+                status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                if status_code == 429:
                     self.log(f"Límite de tasa excedido. Reintentando después de {delay} segundos.")
                     time.sleep(delay)
                     delay *= 2  # Retroceso exponencial para limitación de tasa
                 else:
                     self.log(f"Error al descargar de {url_media}: {e}. Intento {attempt + 1} de {max_attempts}", url=url_media)
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
                     if attempt < max_attempts - 1:
                         time.sleep(3)
+            except Exception as e:
+                self.log(f"Unexpected error downloading {url_media}: {e}")
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                if attempt < max_attempts - 1:
+                    time.sleep(3)
     
     def descargar_post_bunkr(self, url_post):
         try:
